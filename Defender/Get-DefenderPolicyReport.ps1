@@ -243,6 +243,29 @@ function Get-DeviceSummary {
         Write-Verbose ("Unable to query Win32_LogicalDisk: {0}" -f $_.Exception.Message)
     }
 
+    try {
+        $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction Stop | Select-Object -First 1
+        if ($bios) {
+            $summary['BIOS vendor'] = $bios.Manufacturer
+            $summary['BIOS version'] = $bios.SMBIOSBIOSVersion
+            if ($bios.ReleaseDate) {
+                $release = [System.Management.ManagementDateTimeConverter]::ToDateTime($bios.ReleaseDate)
+                $summary['BIOS release'] = $release.ToString('yyyy-MM-dd')
+            }
+        }
+    } catch {
+        Write-Verbose ("Unable to query Win32_BIOS: {0}" -f $_.Exception.Message)
+    }
+
+    try {
+        if (Get-Command -Name Confirm-SecureBootUEFI -ErrorAction SilentlyContinue) {
+            $secureBoot = Confirm-SecureBootUEFI -ErrorAction Stop
+            $summary['Secure Boot'] = if ($secureBoot) { 'Enabled' } else { 'Disabled' }
+        }
+    } catch {
+        Write-Verbose ("Unable to determine Secure Boot state: {0}" -f $_.Exception.Message)
+    }
+
     return $summary
 }
 
