@@ -2,7 +2,7 @@
 param(
     [switch]$AsObject,
     [string]$OutFile,
-    [ValidateSet('Metadata','Compliance Summary','Engine & Signature State','Real-time & Core Protections','Cloud-delivered Protection & Automation','Exploit Guard & Ransomware Protections','Attack Surface Reduction Rules','Attack Surface Reduction Exclusions','Device Control','Firewall Profiles','Scan Health & Schedule','Exclusions','Controlled Folder Access','EDR Sensor State','Threat History')]
+    [ValidateSet('Metadata','Compliance Summary','Engine & Signature State','Real-time & Core Protections','Cloud-delivered Protection & Automation','Exploit Guard & Ransomware Protections','Attack Surface Reduction Rules','Attack Surface Reduction Exclusions','Device Control','Firewall Profiles','Scan Health & Schedule','Exclusions','Controlled Folder Access','Windows Hello for Business Policy','Windows Hello PIN Complexity','Windows Hello Services','Local Users','Local Administrators','EDR Sensor State','Threat History')]
     [string[]]$Section,
     [switch]$IncludeThreatHistory,
     [string]$CsvPath,
@@ -39,6 +39,11 @@ $script:SectionOrder = @(
     'Scan Health & Schedule',
     'Exclusions',
     'Controlled Folder Access',
+    'Windows Hello for Business Policy',
+    'Windows Hello PIN Complexity',
+    'Windows Hello Services',
+    'Local Users',
+    'Local Administrators',
     'EDR Sensor State',
     'Threat History'
 )
@@ -267,6 +272,30 @@ function Get-DeviceSummary {
     }
 
     return $summary
+}
+
+function Get-RegistryDictionary {
+    param([string]$Path)
+
+    if (-not (Test-Path -Path $Path)) {
+        return $null
+    }
+
+    try {
+        $item = Get-ItemProperty -Path $Path -ErrorAction Stop
+        $dict = [ordered]@{}
+        foreach ($prop in $item.PSObject.Properties) {
+            if ($prop.Name -like 'PS*') { continue }
+            $dict[$prop.Name] = $prop.Value
+        }
+        if ($dict.Count -eq 0) {
+            return $null
+        }
+        return $dict
+    } catch {
+        Write-Verbose ("Unable to read registry path {0}: {1}" -f $Path, $_.Exception.Message)
+        return $null
+    }
 }
 
 function New-Section {
@@ -1094,6 +1123,109 @@ function Invoke-DefenderPolicyReportInternal {
             'Protected folders' = Normalize-List -Items ($mpPref.ControlledFolderAccessDefaultProtectedFolders + $mpPref.ControlledFolderAccessProtectedFolders) -RequireElevation -IsElevated:$isElevated -PrivilegeMessage 'Run elevated to view protected folders'
             'Allowed applications' = Normalize-List -Items $mpPref.ControlledFolderAccessAllowedApplications -RequireElevation -IsElevated:$isElevated -PrivilegeMessage 'Run elevated to view allowed applications'
         })
+
+    $whfbPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\PassportForWork'
+    $whfbPolicyValues = Get-RegistryDictionary -Path $whfbPolicyPath
+    if ($whfbPolicyValues) {
+        $policyData = [ordered]@{}
+        foreach ($key in @('Enabled','UseBiometrics','UseEnhancedAntiSpoofing','UsePinRecovery','UseSecurityKeyForSignin','UseRemotePassport','AllowPhoneSignIn','UseEnterpriseKeyCredential')) {
+            if ($whfbPolicyValues.Contains($key)) {
+                $policyData[$key] = $whfbPolicyValues[$key]
+            }
+        }
+        if ($policyData.Count -eq 0) {
+            $policyData['Policy data'] = 'Keys exist but no recognized values were found.'
+        }
+        $sections['Windows Hello for Business Policy'] = New-Section -Name 'Windows Hello for Business Policy' -Type 'KeyValue' -Data $policyData
+    } else {
+        $sections['Windows Hello for Business Policy'] = New-Section -Name 'Windows Hello for Business Policy' -Type 'Message' -Data 'No explicit Windows Hello for Business policy keys detected.'
+    }
+
+    $pinPath = Join-Path $whfbPolicyPath 'PINComplexity'
+    $pinValues = Get-RegistryDictionary -Path $pinPath
+    if ($pinValues) {
+        $pinData = [ordered]@{}
+        foreach ($key in @('MinimumLength','MaximumLength','UppercaseLetters','LowercaseLetters','Digits','SpecialCharacters','History','MaximumPINAge','Expiration','AllowDigits','AllowLowercase','AllowUppercase','AllowSpecialCharacters')) {
+            if ($pinValues.Contains($key)) {
+                $pinData[$key] = $pinValues[$key]
+            }
+        }
+        if ($pinData.Count -eq 0) {
+            $pinData['PIN policy'] = 'PINComplexity key exists but no recognizable values were set.'
+        }
+        $sections['Windows Hello PIN Complexity'] = New-Section -Name 'Windows Hello PIN Complexity' -Type 'KeyValue' -Data $pinData
+    } else {
+        $sections['Windows Hello PIN Complexity'] = New-Section -Name 'Windows Hello PIN Complexity' -Type 'Message' -Data 'No PIN complexity overrides defined.'
+    }
+
+    $whfbServiceNames = @('NgcCtnrSvc','NgcSvc','KeyIso')
+    $serviceRows = @()
+    foreach ($svcName in $whfbServiceNames) {
+        try {
+            $svc = Get-Service -Name $svcName -ErrorAction Stop
+            $serviceRows += [pscustomobject]@{
+                Service = $svc.Name
+                Display = $svc.DisplayName
+                Status  = $svc.Status
+                StartType = $svc.StartType
+            }
+        } catch {
+            $serviceRows += [pscustomobject]@{
+                Service   = $svcName
+                Display   = 'Unavailable'
+                Status    = 'Not installed'
+                StartType = 'N/A'
+            }
+        }
+    }
+    $sections['Windows Hello Services'] = New-Section -Name 'Windows Hello Services' -Type 'Table' -Data $serviceRows
+
+    $localUsersSection = $null
+    try {
+        if (Get-Command -Name Get-LocalUser -ErrorAction SilentlyContinue) {
+            $localUsers = @(Get-LocalUser | Sort-Object Name | ForEach-Object {
+                    [pscustomobject]@{
+                        Name        = $_.Name
+                        Enabled     = $_.Enabled
+                        LastLogon   = $_.LastLogon
+                        Description = $_.Description
+                    }
+                })
+            if ($localUsers.Count -gt 0) {
+                $localUsersSection = New-Section -Name 'Local Users' -Type 'Table' -Data $localUsers
+            } else {
+                $localUsersSection = New-Section -Name 'Local Users' -Type 'Message' -Data 'No local user accounts found.'
+            }
+        } else {
+            $localUsersSection = New-Section -Name 'Local Users' -Type 'Message' -Data 'Get-LocalUser cmdlet not available on this platform.'
+        }
+    } catch {
+        $localUsersSection = New-Section -Name 'Local Users' -Type 'Message' -Data ("Unable to enumerate local users: {0}" -f $_.Exception.Message)
+    }
+    if ($localUsersSection) { $sections['Local Users'] = $localUsersSection }
+
+    $localAdminsSection = $null
+    try {
+        if (Get-Command -Name Get-LocalGroupMember -ErrorAction SilentlyContinue) {
+            $adminMembers = @(Get-LocalGroupMember -Group 'Administrators' | Sort-Object Name | ForEach-Object {
+                    [pscustomobject]@{
+                        Name          = $_.Name
+                        Class         = $_.ObjectClass
+                        PrincipalSource = $_.PrincipalSource
+                    }
+                })
+            if ($adminMembers.Count -gt 0) {
+                $localAdminsSection = New-Section -Name 'Local Administrators' -Type 'Table' -Data $adminMembers
+            } else {
+                $localAdminsSection = New-Section -Name 'Local Administrators' -Type 'Message' -Data 'No members found in the local Administrators group.'
+            }
+        } else {
+            $localAdminsSection = New-Section -Name 'Local Administrators' -Type 'Message' -Data 'Get-LocalGroupMember cmdlet not available on this platform.'
+        }
+    } catch {
+        $localAdminsSection = New-Section -Name 'Local Administrators' -Type 'Message' -Data ("Unable to enumerate local administrators: {0}" -f $_.Exception.Message)
+    }
+    if ($localAdminsSection) { $sections['Local Administrators'] = $localAdminsSection }
 
     $sections['EDR Sensor State'] = New-Section -Name 'EDR Sensor State' -Type 'KeyValue' -Data ([ordered]@{
         'Sense running state' = Get-OptionalPropertyValue -Object $mpStatus -PropertyName 'SenseRunningState'
