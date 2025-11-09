@@ -4,11 +4,26 @@ param(
     [string]$OutFile,
     [ValidateSet('Metadata','Compliance Summary','Engine & Signature State','Real-time & Core Protections','Cloud-delivered Protection & Automation','Exploit Guard & Ransomware Protections','Attack Surface Reduction Rules','Attack Surface Reduction Exclusions','Device Control','Firewall Profiles','Scan Health & Schedule','Exclusions','Controlled Folder Access','EDR Sensor State','Threat History')]
     [string[]]$Section,
-    [switch]$IncludeThreatHistory
+    [switch]$IncludeThreatHistory,
+    [string]$CsvPath,
+    [string]$HtmlPath,
+    [string]$AsrCatalogPath,
+    [string]$AsrCatalogUri = 'https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/attack-surface-reduction-rules-reference',
+    [switch]$RefreshAsrCatalog
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$script:ScriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $PSCommandPath }
+if (-not $AsrCatalogPath -or $AsrCatalogPath.Trim().Length -eq 0) {
+    $AsrCatalogPath = Join-Path -Path $script:ScriptRoot -ChildPath 'data\asr-catalog.json'
+}
+if (-not $PSBoundParameters.ContainsKey('AsrCatalogPath')) {
+    $PSBoundParameters['AsrCatalogPath'] = $AsrCatalogPath
+}
+Write-Verbose ("Script root resolved to: {0}" -f $script:ScriptRoot)
+Write-Verbose ("ASR catalog path resolved to: {0}" -f $AsrCatalogPath)
 
 $script:SectionOrder = @(
     'Metadata',
@@ -37,7 +52,7 @@ $script:PuaMap = @{ 0 = 'Disabled'; 1 = 'Enabled'; 2 = 'Audit' }
 $script:ScheduleDayMap = @{ 0 = 'Every day'; 1 = 'Sunday'; 2 = 'Monday'; 3 = 'Tuesday'; 4 = 'Wednesday'; 5 = 'Thursday'; 6 = 'Friday'; 7 = 'Saturday'; 8 = 'Never' }
 $script:AsrActionMap = @{ 0 = 'Disabled'; 1 = 'Block'; 2 = 'Audit'; 6 = 'Warn' }
 
-$script:AsrRuleDescriptions = @{ 
+$script:DefaultAsrRuleDescriptions = @{
     '01443614-cd74-433a-b99e-2ecdc07bfc25' = 'Block executable files unless prevalence, age, or trusted list criteria are met'
     '26190899-1602-49e8-8b27-eb1d0a1ce869' = 'Block Office communication apps from creating child processes'
     '33ddedf1-c6e0-47cb-833e-de6133960387' = 'Block rebooting machine in Safe Mode'
@@ -255,6 +270,348 @@ function Convert-SectionsToText {
     return $builder.ToString().TrimEnd()
 }
 
+function Convert-SectionsToFlatRows {
+    param($Sections)
+
+    $rows = @()
+    foreach ($section in $Sections) {
+        if ($null -eq $section) { continue }
+        $sectionName = $section.Name
+        switch ($section.Type) {
+            'KeyValue' {
+                $data = $section.Data
+                if ($null -eq $data) { continue }
+                if ($data -is [System.Collections.IDictionary]) {
+                    foreach ($key in $data.Keys) {
+                        $rows += [pscustomobject]@{
+                            Section = $sectionName
+                            Item    = $key
+                            Value   = Format-Value $data[$key]
+                        }
+                    }
+                } else {
+                    foreach ($prop in $data.PSObject.Properties) {
+                        $rows += [pscustomobject]@{
+                            Section = $sectionName
+                            Item    = $prop.Name
+                            Value   = Format-Value $prop.Value
+                        }
+                    }
+                }
+            }
+            'List' {
+                $items = @($section.Data)
+                if ($items.Count -eq 0) {
+                    $rows += [pscustomobject]@{ Section = $sectionName; Item = 'Item'; Value = 'None' }
+                } else {
+                    $index = 1
+                    foreach ($item in $items) {
+                        $rows += [pscustomobject]@{
+                            Section = $sectionName
+                            Item    = "Item $index"
+                            Value   = Format-Value $item
+                        }
+                        $index++
+                    }
+                }
+            }
+            'ListMap' {
+                $map = $section.Data
+                if ($null -eq $map) { continue }
+                if (-not ($map -is [System.Collections.IDictionary])) {
+                    $map = [ordered]@{ Items = @($map) }
+                }
+
+                foreach ($key in $map.Keys) {
+                    $items = @($map[$key])
+                    if ($items.Count -eq 0) {
+                        $rows += [pscustomobject]@{ Section = $sectionName; Item = $key; Value = 'None' }
+                    } else {
+                        foreach ($item in $items) {
+                            $rows += [pscustomobject]@{
+                                Section = $sectionName
+                                Item    = $key
+                                Value   = Format-Value $item
+                            }
+                        }
+                    }
+                }
+            }
+            'Table' {
+                $tableRows = @($section.Data)
+                if ($tableRows.Count -eq 0) {
+                    $rows += [pscustomobject]@{ Section = $sectionName; Item = 'Row'; Value = 'None' }
+                } else {
+                    $rowIndex = 1
+                    foreach ($row in $tableRows) {
+                        $rows += [pscustomobject]@{
+                            Section = $sectionName
+                            Item    = "Row $rowIndex"
+                            Value   = ($row | ConvertTo-Json -Depth 5 -Compress)
+                        }
+                        $rowIndex++
+                    }
+                }
+            }
+            'Message' {
+                $rows += [pscustomobject]@{
+                    Section = $sectionName
+                    Item    = 'Message'
+                    Value   = Format-Value $section.Data
+                }
+            }
+        }
+    }
+
+    return $rows
+}
+
+function Convert-SectionsToHtml {
+    param(
+        $Sections,
+        [string]$Title = 'Microsoft Defender Policy Report'
+    )
+
+    $encode = {
+        param($text)
+        if ($null -eq $text) { return '' }
+        return [System.Net.WebUtility]::HtmlEncode(($text).ToString())
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.AppendLine('<!DOCTYPE html>')
+    [void]$builder.AppendLine('<html lang="en">')
+    [void]$builder.AppendLine('<head>')
+    [void]$builder.AppendLine('<meta charset="utf-8" />')
+    [void]$builder.AppendLine("<title>$([System.Net.WebUtility]::HtmlEncode($Title))</title>")
+    [void]$builder.AppendLine('<style>body{font-family:"Segoe UI",Arial,sans-serif;margin:24px;}h1{font-size:24px;}h2{font-size:18px;border-bottom:1px solid #ddd;padding-bottom:4px;}table{border-collapse:collapse;margin-bottom:16px;}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;}ul{padding-left:20px;}li{margin-bottom:4px;}</style>')
+    [void]$builder.AppendLine('</head>')
+    [void]$builder.AppendLine('<body>')
+    [void]$builder.AppendLine("<h1>$([System.Net.WebUtility]::HtmlEncode($Title))</h1>")
+
+    foreach ($section in $Sections) {
+        if ($null -eq $section) { continue }
+        [void]$builder.AppendLine("<h2>$($encode.Invoke($section.Name))</h2>")
+
+        switch ($section.Type) {
+            'KeyValue' {
+                $data = $section.Data
+                if ($null -eq $data) {
+                    [void]$builder.AppendLine('<p>No data</p>')
+                    break
+                }
+
+                $rows = @()
+                if ($data -is [System.Collections.IDictionary]) {
+                    foreach ($key in $data.Keys) {
+                        $rows += [pscustomobject]@{ Key = $key; Value = Format-Value $data[$key] }
+                    }
+                } else {
+                    foreach ($prop in $data.PSObject.Properties) {
+                        $rows += [pscustomobject]@{ Key = $prop.Name; Value = Format-Value $prop.Value }
+                    }
+                }
+
+                if ($rows.Count -eq 0) {
+                    [void]$builder.AppendLine('<p>No data</p>')
+                } else {
+                    [void]$builder.AppendLine('<table><thead><tr><th>Setting</th><th>Value</th></tr></thead><tbody>')
+                    foreach ($row in $rows) {
+                        [void]$builder.AppendLine("<tr><th>$($encode.Invoke($row.Key))</th><td>$($encode.Invoke($row.Value))</td></tr>")
+                    }
+                    [void]$builder.AppendLine('</tbody></table>')
+                }
+            }
+            'List' {
+                $items = @($section.Data)
+                if ($items.Count -eq 0) {
+                    [void]$builder.AppendLine('<p>None</p>')
+                } else {
+                    [void]$builder.AppendLine('<ul>')
+                    foreach ($item in $items) {
+                        [void]$builder.AppendLine("<li>$($encode.Invoke((Format-Value $item)))</li>")
+                    }
+                    [void]$builder.AppendLine('</ul>')
+                }
+            }
+            'ListMap' {
+                $map = $section.Data
+                if ($null -eq $map) {
+                    [void]$builder.AppendLine('<p>No data</p>')
+                    break
+                }
+
+                if (-not ($map -is [System.Collections.IDictionary])) {
+                    $map = [ordered]@{ Items = @($map) }
+                }
+
+                foreach ($key in $map.Keys) {
+                    $items = @($map[$key])
+                    if ($items.Count -eq 0) {
+                        [void]$builder.AppendLine("<p><strong>$($encode.Invoke($key))</strong>: None</p>")
+                    } else {
+                        [void]$builder.AppendLine("<p><strong>$($encode.Invoke($key))</strong></p>")
+                        [void]$builder.AppendLine('<ul>')
+                        foreach ($item in $items) {
+                            [void]$builder.AppendLine("<li>$($encode.Invoke((Format-Value $item)))</li>")
+                        }
+                        [void]$builder.AppendLine('</ul>')
+                    }
+                }
+            }
+            'Table' {
+                $tableRows = @($section.Data)
+                if ($tableRows.Count -eq 0) {
+                    [void]$builder.AppendLine('<p>None</p>')
+                } else {
+                    $properties = $tableRows[0].PSObject.Properties.Name
+                    [void]$builder.AppendLine('<table><thead><tr>')
+                    foreach ($propName in $properties) {
+                        [void]$builder.AppendLine("<th>$($encode.Invoke($propName))</th>")
+                    }
+                    [void]$builder.AppendLine('</tr></thead><tbody>')
+                    foreach ($row in $tableRows) {
+                        [void]$builder.AppendLine('<tr>')
+                        foreach ($propName in $properties) {
+                            $value = $row.$propName
+                            [void]$builder.AppendLine("<td>$($encode.Invoke((Format-Value $value)))</td>")
+                        }
+                        [void]$builder.AppendLine('</tr>')
+                    }
+                    [void]$builder.AppendLine('</tbody></table>')
+                }
+            }
+            'Message' {
+                [void]$builder.AppendLine("<p>$($encode.Invoke((Format-Value $section.Data)))</p>")
+            }
+        }
+    }
+
+    [void]$builder.AppendLine('</body>')
+    [void]$builder.AppendLine('</html>')
+    return $builder.ToString()
+}
+
+function Ensure-DirectoryForFile {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+
+    $directory = Split-Path -Path $Path -Parent
+    if ($directory -and -not (Test-Path -Path $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+}
+
+function Update-AsrCatalog {
+    param(
+        [Parameter(Mandatory)][string]$CatalogPath,
+        [Parameter(Mandatory)][string]$CatalogUri
+    )
+
+    Write-Verbose ("Refreshing ASR catalog from {0}" -f $CatalogUri)
+    $response = Invoke-WebRequest -Uri $CatalogUri -UseBasicParsing
+    $html = $response.Content
+    $pattern = '<td style="text-align: left;">(?<name>.*?)</td>\s*<td style="text-align: left;">(?<guid>[0-9a-fA-F-]{36})</td>'
+    $matches = [System.Text.RegularExpressions.Regex]::Matches($html, $pattern, [System.Text.RegularExpressions.RegexOptions]::Singleline)
+
+    $rules = $matches | ForEach-Object {
+        [pscustomobject]@{
+            guid = $_.Groups['guid'].Value.ToLower()
+            name = ([System.Net.WebUtility]::HtmlDecode($_.Groups['name'].Value).Trim())
+        }
+    } | Sort-Object guid -Unique
+
+    if ($rules.Count -eq 0) {
+        throw "Failed to parse ASR rule data from $CatalogUri"
+    }
+
+    $catalog = [ordered]@{
+        source    = $CatalogUri
+        generated = (Get-Date).ToString('s')
+        ruleCount = $rules.Count
+        rules     = $rules
+    }
+
+    Ensure-DirectoryForFile -Path $CatalogPath
+    $json = $catalog | ConvertTo-Json -Depth 5
+    Set-Content -Path $CatalogPath -Value $json -Encoding UTF8
+}
+
+function Load-AsrCatalog {
+    param([string]$CatalogPath)
+
+    if ([string]::IsNullOrWhiteSpace($CatalogPath)) { return $null }
+
+    if (-not (Test-Path -Path $CatalogPath)) { return $null }
+
+    try {
+        $raw = Get-Content -Path $CatalogPath -Raw -Encoding UTF8 -ErrorAction Stop
+        return $raw | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        Write-Warning ("Unable to read ASR catalog from {0}: {1}" -f $CatalogPath, $_.Exception.Message)
+        return $null
+    }
+}
+
+function Get-AsrRuleDescriptions {
+    param(
+        [string]$CatalogPath,
+        [switch]$Refresh,
+        [string]$CatalogUri,
+        [hashtable]$Fallback
+    )
+
+    if ($Refresh) {
+        try {
+            Update-AsrCatalog -CatalogPath $CatalogPath -CatalogUri $CatalogUri
+        } catch {
+            Write-Warning $_.Exception.Message
+        }
+    }
+
+    $catalog = Load-AsrCatalog -CatalogPath $CatalogPath
+
+    if ($null -eq $catalog -and -not $Refresh) {
+        try {
+            Update-AsrCatalog -CatalogPath $CatalogPath -CatalogUri $CatalogUri
+            $catalog = Load-AsrCatalog -CatalogPath $CatalogPath
+        } catch {
+            Write-Warning $_.Exception.Message
+        }
+    }
+
+    $descriptions = @{}
+
+    if ($null -ne $catalog) {
+        $ruleObjects = @()
+        if ($catalog.PSObject.Properties['rules']) {
+            $ruleObjects = @($catalog.rules)
+        } elseif ($catalog -is [System.Collections.IEnumerable] -and -not ($catalog -is [string])) {
+            $ruleObjects = @($catalog)
+        }
+
+        foreach ($rule in $ruleObjects) {
+            $guid = $rule.guid
+            if (-not $guid -and $rule.PSObject.Properties['Guid']) { $guid = $rule.Guid }
+            $name = $rule.name
+            if (-not $name -and $rule.PSObject.Properties['Name']) { $name = $rule.Name }
+
+            if ([string]::IsNullOrWhiteSpace($guid) -or [string]::IsNullOrWhiteSpace($name)) { continue }
+            $descriptions[$guid.ToLower()] = $name.Trim()
+        }
+    }
+
+    if ($descriptions.Count -eq 0 -and $Fallback) {
+        Write-Verbose 'Falling back to built-in ASR rule catalog.'
+        $descriptions = $Fallback
+    }
+
+    return $descriptions
+}
+
 function Get-AsrRuleRows {
     param(
         $Preference,
@@ -308,7 +665,12 @@ function Invoke-DefenderPolicyReportInternal {
         [switch]$AsObject,
         [string]$OutFile,
         [string[]]$Section,
-        [switch]$IncludeThreatHistory
+        [switch]$IncludeThreatHistory,
+        [string]$CsvPath,
+        [string]$HtmlPath,
+        [string]$AsrCatalogPath,
+        [string]$AsrCatalogUri,
+        [switch]$RefreshAsrCatalog
     )
 
     if (-not (Get-Command -Name Get-MpPreference -ErrorAction SilentlyContinue)) {
@@ -323,6 +685,9 @@ function Invoke-DefenderPolicyReportInternal {
 
     $sections = [ordered]@{}
 
+    $asrRuleDescriptions = Get-AsrRuleDescriptions -CatalogPath $AsrCatalogPath -Refresh:$RefreshAsrCatalog -CatalogUri $AsrCatalogUri -Fallback $script:DefaultAsrRuleDescriptions
+    if ($null -eq $asrRuleDescriptions) { $asrRuleDescriptions = @{} }
+
     $sections['Metadata'] = New-Section -Name 'Metadata' -Type 'KeyValue' -Data ([ordered]@{
             'Computer name' = $env:COMPUTERNAME
             'User'          = $env:USERNAME
@@ -331,11 +696,11 @@ function Invoke-DefenderPolicyReportInternal {
         })
 
     $asrRows = @(
-        Get-AsrRuleRows -Preference $mpPref -RuleDescriptions $script:AsrRuleDescriptions -ActionMap $script:AsrActionMap
+        Get-AsrRuleRows -Preference $mpPref -RuleDescriptions $asrRuleDescriptions -ActionMap $script:AsrActionMap
     )
     $configuredAsr = $asrRows.Count
     $complianceData = [ordered]@{
-        'ASR rules configured'              = ('{0}/{1}' -f $configuredAsr, $script:AsrRuleDescriptions.Count)
+        'ASR rules configured'              = ('{0}/{1}' -f $configuredAsr, $asrRuleDescriptions.Count)
         'Controlled folder access'          = Get-MappedValue -Value $mpPref.EnableControlledFolderAccess -Map $script:ControlledFolderAccess
         'Network protection'                = Get-MappedValue -Value $mpPref.EnableNetworkProtection -Map $script:NetworkProtection
         'Potentially unwanted apps'         = Get-MappedValue -Value $mpPref.PUAProtection -Map $script:PuaMap
@@ -490,11 +855,21 @@ function Invoke-DefenderPolicyReportInternal {
     $text = $null
     if ($needsText) { $text = Convert-SectionsToText -Sections $filteredSections }
 
+    if ($CsvPath) {
+        $csvRows = Convert-SectionsToFlatRows -Sections $filteredSections
+        Ensure-DirectoryForFile -Path $CsvPath
+        $csvRows | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
+    }
+
+    if ($HtmlPath) {
+        $htmlTitle = "Microsoft Defender Policy Report - $($env:COMPUTERNAME)"
+        $htmlContent = Convert-SectionsToHtml -Sections $filteredSections -Title $htmlTitle
+        Ensure-DirectoryForFile -Path $HtmlPath
+        Set-Content -Path $HtmlPath -Value $htmlContent -Encoding UTF8
+    }
+
     if ($OutFile) {
-        $directory = Split-Path -Path $OutFile -Parent
-        if ($directory -and -not (Test-Path -Path $directory)) {
-            New-Item -ItemType Directory -Path $directory -Force | Out-Null
-        }
+        Ensure-DirectoryForFile -Path $OutFile
         Set-Content -Path $OutFile -Value $text -Encoding ASCII
     }
 
@@ -505,4 +880,4 @@ function Invoke-DefenderPolicyReportInternal {
     Write-Output $text
 }
 
-Invoke-DefenderPolicyReportInternal @PSBoundParameters -IncludeThreatHistory
+Invoke-DefenderPolicyReportInternal @PSBoundParameters -HtmlPath
