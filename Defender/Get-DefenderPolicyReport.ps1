@@ -169,6 +169,70 @@ function Get-OptionalPropertyValue {
     return $property.Value
 }
 
+function Get-DeviceSummary {
+    $summary = [ordered]@{}
+
+    try {
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+        if ($cs) {
+            $summary['Manufacturer'] = $cs.Manufacturer
+            $summary['Model'] = $cs.Model
+            if ($cs.TotalPhysicalMemory) {
+                $summary['Physical memory'] = (“{0:N2} GB” -f ($cs.TotalPhysicalMemory / 1GB))
+            }
+            $summary['Logical processors'] = $cs.NumberOfLogicalProcessors
+        }
+    } catch {
+        Write-Verbose ("Unable to query Win32_ComputerSystem: {0}" -f $_.Exception.Message)
+    }
+
+    try {
+        $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1
+        if ($cpu) {
+            $summary['Processor'] = $cpu.Name
+        }
+    } catch {
+        Write-Verbose ("Unable to query Win32_Processor: {0}" -f $_.Exception.Message)
+    }
+
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        if ($os) {
+            $summary['Operating system'] = $os.Caption
+            $summary['OS version'] = (“{0} (Build {1})” -f $os.Version, $os.BuildNumber)
+            if ($os.InstallDate) {
+                $installDate = [System.Management.ManagementDateTimeConverter]::ToDateTime($os.InstallDate)
+                $summary['OS installed'] = $installDate.ToString('yyyy-MM-dd')
+            }
+            if ($os.LastBootUpTime) {
+                $boot = [System.Management.ManagementDateTimeConverter]::ToDateTime($os.LastBootUpTime)
+                $uptime = (Get-Date) - $boot
+                $summary['System uptime'] = (“{0:%d}d {0:%h}h {0:%m}m” -f $uptime)
+            }
+        }
+    } catch {
+        Write-Verbose ("Unable to query Win32_OperatingSystem: {0}" -f $_.Exception.Message)
+    }
+
+    try {
+        $disks = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction Stop
+        if ($disks) {
+            $total = ($disks | Measure-Object -Property Size -Sum).Sum
+            $free = ($disks | Measure-Object -Property FreeSpace -Sum).Sum
+            if ($total -gt 0) {
+                $summary['Storage (total)'] = (“{0:N2} GB” -f ($total / 1GB))
+            }
+            if ($free -ge 0) {
+                $summary['Storage (free)'] = (“{0:N2} GB” -f ($free / 1GB))
+            }
+        }
+    } catch {
+        Write-Verbose ("Unable to query Win32_LogicalDisk: {0}" -f $_.Exception.Message)
+    }
+
+    return $summary
+}
+
 function New-Section {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -864,12 +928,19 @@ function Invoke-DefenderPolicyReportInternal {
     $asrRuleDescriptions = Get-AsrRuleDescriptions -CatalogPath $AsrCatalogPath -Refresh:$RefreshAsrCatalog -CatalogUri $AsrCatalogUri -Fallback $script:DefaultAsrRuleDescriptions
     if ($null -eq $asrRuleDescriptions) { $asrRuleDescriptions = @{} }
 
-    $sections['Metadata'] = New-Section -Name 'Metadata' -Type 'KeyValue' -Data ([ordered]@{
-            'Computer name' = $env:COMPUTERNAME
-            'User'          = $env:USERNAME
-            'Generated'     = $reportTime
-            'Elevated'      = $isElevated
-        })
+    $deviceSummary = Get-DeviceSummary
+    $metadataData = [ordered]@{
+        'Computer name' = $env:COMPUTERNAME
+        'User'          = $env:USERNAME
+        'Generated'     = $reportTime
+        'Elevated'      = $isElevated
+    }
+    if ($deviceSummary) {
+        foreach ($key in $deviceSummary.Keys) {
+            $metadataData[$key] = $deviceSummary[$key]
+        }
+    }
+    $sections['Metadata'] = New-Section -Name 'Metadata' -Type 'KeyValue' -Data $metadataData
 
     $asrRows = @(
         Get-AsrRuleRows -Preference $mpPref -RuleDescriptions $asrRuleDescriptions -ActionMap $script:AsrActionMap
@@ -1056,4 +1127,4 @@ function Invoke-DefenderPolicyReportInternal {
     Write-Output $text
 }
 
-Invoke-DefenderPolicyReportInternal @PSBoundParameters
+Invoke-DefenderPolicyReportInternal @PSBoundParameters -htmlpath $env:temp\defender-report-modern.html
