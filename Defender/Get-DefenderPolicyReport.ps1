@@ -1113,6 +1113,13 @@ function Invoke-DefenderPolicyReportInternal {
         $htmlContent = Convert-SectionsToHtml -Sections $filteredSections -Title $htmlTitle
         Ensure-DirectoryForFile -Path $HtmlPath
         Set-Content -Path $HtmlPath -Value $htmlContent -Encoding UTF8
+        try {
+            if (Test-Path -Path $HtmlPath) {
+                Start-Process -FilePath $HtmlPath | Out-Null
+            }
+        } catch {
+            Write-Verbose ("Unable to open HTML report {0}: {1}" -f $HtmlPath, $_.Exception.Message)
+        }
     }
 
     if ($OutFile) {
@@ -1127,4 +1134,4 @@ function Invoke-DefenderPolicyReportInternal {
     Write-Output $text
 }
 
-Invoke-DefenderPolicyReportInternal @PSBoundParameters -htmlpath $env:temp\defender-report-modern.html
+Invoke-DefenderPolicyReportInternal @PSBoundParameters -HtmlPath $env:temp\defender-report.html
