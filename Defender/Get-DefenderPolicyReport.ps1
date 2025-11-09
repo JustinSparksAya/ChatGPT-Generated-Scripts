@@ -177,10 +177,12 @@ function Get-DeviceSummary {
         if ($cs) {
             $summary['Manufacturer'] = $cs.Manufacturer
             $summary['Model'] = $cs.Model
+            if ($cs.SystemType) { $summary['System type'] = $cs.SystemType }
             if ($cs.TotalPhysicalMemory) {
-                $summary['Physical memory'] = (“{0:N2} GB” -f ($cs.TotalPhysicalMemory / 1GB))
+                $totalMemoryGB = [math]::Round(($cs.TotalPhysicalMemory / 1GB), 2)
+                $summary['Physical memory'] = ("{0:N2} GB" -f $totalMemoryGB)
             }
-            $summary['Logical processors'] = $cs.NumberOfLogicalProcessors
+            if ($cs.NumberOfLogicalProcessors) { $summary['Logical processors'] = $cs.NumberOfLogicalProcessors }
         }
     } catch {
         Write-Verbose ("Unable to query Win32_ComputerSystem: {0}" -f $_.Exception.Message)
@@ -190,6 +192,9 @@ function Get-DeviceSummary {
         $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Select-Object -First 1
         if ($cpu) {
             $summary['Processor'] = $cpu.Name
+            if ($cpu.MaxClockSpeed) {
+                $summary['Base clock'] = ("{0} MHz" -f $cpu.MaxClockSpeed)
+            }
         }
     } catch {
         Write-Verbose ("Unable to query Win32_Processor: {0}" -f $_.Exception.Message)
@@ -199,7 +204,15 @@ function Get-DeviceSummary {
         $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
         if ($os) {
             $summary['Operating system'] = $os.Caption
-            $summary['OS version'] = (“{0} (Build {1})” -f $os.Version, $os.BuildNumber)
+            $summary['OS version'] = ("{0} (Build {1})" -f $os.Version, $os.BuildNumber)
+            if ($os.TotalVisibleMemorySize) {
+                $totalVisibleGB = [math]::Round((($os.TotalVisibleMemorySize * 1KB) / 1GB), 2)
+                $summary['Physical memory (visible)'] = ("{0:N2} GB" -f $totalVisibleGB)
+            }
+            if ($os.FreePhysicalMemory) {
+                $freeMemoryGB = [math]::Round((($os.FreePhysicalMemory * 1KB) / 1GB), 2)
+                $summary['Memory available'] = ("{0:N2} GB" -f $freeMemoryGB)
+            }
             if ($os.InstallDate) {
                 $installDate = [System.Management.ManagementDateTimeConverter]::ToDateTime($os.InstallDate)
                 $summary['OS installed'] = $installDate.ToString('yyyy-MM-dd')
