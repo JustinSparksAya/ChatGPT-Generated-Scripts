@@ -384,14 +384,148 @@ function Convert-SectionsToHtml {
     [void]$builder.AppendLine('<head>')
     [void]$builder.AppendLine('<meta charset="utf-8" />')
     [void]$builder.AppendLine("<title>$([System.Net.WebUtility]::HtmlEncode($Title))</title>")
-    [void]$builder.AppendLine('<style>body{font-family:"Segoe UI",Arial,sans-serif;margin:24px;}h1{font-size:24px;}h2{font-size:18px;border-bottom:1px solid #ddd;padding-bottom:4px;}table{border-collapse:collapse;margin-bottom:16px;}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;}ul{padding-left:20px;}li{margin-bottom:4px;}</style>')
+    [void]$builder.AppendLine('<style>
+        :root{
+            color-scheme: light dark;
+            --bg:#f4f6fb;
+            --card:#ffffff;
+            --border:#d8dce7;
+            --text:#1f2430;
+            --accent:#2563eb;
+        }
+        body{
+            font-family:"Segoe UI",Roboto,Arial,sans-serif;
+            margin:0;
+            background:var(--bg);
+            color:var(--text);
+        }
+        header{
+            background:var(--card);
+            padding:24px 32px;
+            box-shadow:0 2px 8px rgba(15,23,42,.08);
+            position:sticky;
+            top:0;
+            z-index:10;
+        }
+        h1{margin:0;font-size:26px;}
+        .toolbar{
+            display:flex;
+            gap:12px;
+            margin-top:12px;
+            flex-wrap:wrap;
+        }
+        .toolbar input{
+            flex:1;
+            min-width:220px;
+            padding:10px 14px;
+            border:1px solid var(--border);
+            border-radius:8px;
+            font-size:14px;
+        }
+        .toolbar button{
+            padding:10px 16px;
+            background:var(--accent);
+            color:#fff;
+            border:none;
+            border-radius:8px;
+            cursor:pointer;
+            font-size:14px;
+        }
+        main{
+            padding:32px;
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+            gap:24px;
+        }
+        .section-card{
+            background:var(--card);
+            border:1px solid var(--border);
+            border-radius:14px;
+            box-shadow:0 6px 20px rgba(15,23,42,.08);
+            padding:20px 22px;
+        }
+        .section-header{
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            margin-bottom:12px;
+            gap:8px;
+        }
+        .section-header h2{
+            margin:0;
+            font-size:18px;
+        }
+        .section-header button{
+            background:none;
+            border:1px solid var(--border);
+            border-radius:8px;
+            padding:4px 10px;
+            cursor:pointer;
+            font-size:12px;
+            color:var(--text);
+        }
+        .section-content.collapsed{display:none;}
+        .table-wrapper{
+            border-radius:12px;
+            border:1px solid var(--border);
+            overflow:hidden;
+            box-shadow:0 4px 14px rgba(15,23,42,.08);
+            margin-bottom:12px;
+        }
+        table{
+            width:100%;
+            border-collapse:separate;
+            border-spacing:0;
+        }
+        th,td{
+            padding:10px 14px;
+            text-align:left;
+            font-size:13px;
+            border-bottom:1px solid var(--border);
+        }
+        th{
+            background:linear-gradient(135deg,#eef2ff 0%,#e0e7ff 100%);
+            font-weight:600;
+            letter-spacing:.02em;
+        }
+        tr:nth-child(even) td{
+            background:#f8f9ff;
+        }
+        tr:hover td{
+            background:#ecf2ff;
+        }
+        tr:last-child td{
+            border-bottom:none;
+        }
+        ul{
+            padding-left:18px;
+            margin:0;
+        }
+        li{margin-bottom:4px;}
+        @media (max-width:768px){
+            main{grid-template-columns:1fr;padding:18px;}
+            header{position:static;}
+        }
+    </style>')
     [void]$builder.AppendLine('</head>')
     [void]$builder.AppendLine('<body>')
+    [void]$builder.AppendLine('<header id="top">')
     [void]$builder.AppendLine("<h1>$([System.Net.WebUtility]::HtmlEncode($Title))</h1>")
+    [void]$builder.AppendLine('<div class="toolbar"><input id="filterBox" type="search" placeholder="Filter sections..." /><button id="expandAll" type="button">Expand all</button><button id="collapseAll" type="button">Collapse all</button></div>')
+    [void]$builder.AppendLine('</header>')
+    [void]$builder.AppendLine('<main id="sections">')
 
+    $sectionIndex = 0
     foreach ($section in $Sections) {
         if ($null -eq $section) { continue }
-        [void]$builder.AppendLine("<h2>$($encode.Invoke($section.Name))</h2>")
+        $sectionIndex++
+        $sectionId = [System.Text.RegularExpressions.Regex]::Replace($section.Name.ToLowerInvariant(), '[^a-z0-9]+', '-').Trim('-')
+        if ([string]::IsNullOrWhiteSpace($sectionId)) { $sectionId = "section-$sectionIndex" }
+        $searchPayload = ($section | ConvertTo-Json -Depth 5 -Compress)
+        $searchText = ($section.Name + ' ' + $searchPayload).ToLowerInvariant()
+        [void]$builder.AppendLine("<article class='section-card' id='$sectionId' data-search='$($encode.Invoke($searchText))'>")
+        [void]$builder.AppendLine("<div class='section-header'><h2>$($encode.Invoke($section.Name))</h2><button type='button' class='toggle'>Collapse</button></div>")
+        [void]$builder.AppendLine("<div class='section-content'>")
 
         switch ($section.Type) {
             'KeyValue' {
@@ -415,11 +549,11 @@ function Convert-SectionsToHtml {
                 if ($rows.Count -eq 0) {
                     [void]$builder.AppendLine('<p>No data</p>')
                 } else {
-                    [void]$builder.AppendLine('<table><thead><tr><th>Setting</th><th>Value</th></tr></thead><tbody>')
+                    [void]$builder.AppendLine('<div class="table-wrapper"><table><thead><tr><th>Setting</th><th>Value</th></tr></thead><tbody>')
                     foreach ($row in $rows) {
                         [void]$builder.AppendLine("<tr><th>$($encode.Invoke($row.Key))</th><td>$($encode.Invoke($row.Value))</td></tr>")
                     }
-                    [void]$builder.AppendLine('</tbody></table>')
+                    [void]$builder.AppendLine('</tbody></table></div>')
                 }
             }
             'List' {
@@ -465,7 +599,7 @@ function Convert-SectionsToHtml {
                     [void]$builder.AppendLine('<p>None</p>')
                 } else {
                     $properties = $tableRows[0].PSObject.Properties.Name
-                    [void]$builder.AppendLine('<table><thead><tr>')
+                    [void]$builder.AppendLine('<div class="table-wrapper"><table><thead><tr>')
                     foreach ($propName in $properties) {
                         [void]$builder.AppendLine("<th>$($encode.Invoke($propName))</th>")
                     }
@@ -478,15 +612,57 @@ function Convert-SectionsToHtml {
                         }
                         [void]$builder.AppendLine('</tr>')
                     }
-                    [void]$builder.AppendLine('</tbody></table>')
+                    [void]$builder.AppendLine('</tbody></table></div>')
                 }
             }
             'Message' {
                 [void]$builder.AppendLine("<p>$($encode.Invoke((Format-Value $section.Data)))</p>")
             }
         }
+
+        [void]$builder.AppendLine('</div></article>')
     }
 
+    [void]$builder.AppendLine('</main>')
+    [void]$builder.AppendLine('<script>
+        (function(){
+            const filterBox = document.getElementById("filterBox");
+            const cards = Array.from(document.querySelectorAll(".section-card"));
+            const expandAll = document.getElementById("expandAll");
+            const collapseAll = document.getElementById("collapseAll");
+
+            const setCollapsed = (collapsed) => {
+                cards.forEach(card => {
+                    const content = card.querySelector(".section-content");
+                    const toggle = card.querySelector(".toggle");
+                    if (!content || !toggle) { return; }
+                    content.classList.toggle("collapsed", collapsed);
+                    toggle.textContent = collapsed ? "Expand" : "Collapse";
+                });
+            };
+
+            filterBox.addEventListener("input", () => {
+                const term = filterBox.value.trim().toLowerCase();
+                cards.forEach(card => {
+                    const matches = card.dataset.search.includes(term);
+                    card.style.display = matches ? "" : "none";
+                });
+            });
+
+            cards.forEach(card => {
+                const toggle = card.querySelector(".toggle");
+                const content = card.querySelector(".section-content");
+                if (!toggle || !content) { return; }
+                toggle.addEventListener("click", () => {
+                    const collapsed = content.classList.toggle("collapsed");
+                    toggle.textContent = collapsed ? "Expand" : "Collapse";
+                });
+            });
+
+            expandAll.addEventListener("click", () => setCollapsed(false));
+            collapseAll.addEventListener("click", () => setCollapsed(true));
+        })();
+    </script>')
     [void]$builder.AppendLine('</body>')
     [void]$builder.AppendLine('</html>')
     return $builder.ToString()
@@ -880,4 +1056,4 @@ function Invoke-DefenderPolicyReportInternal {
     Write-Output $text
 }
 
-Invoke-DefenderPolicyReportInternal @PSBoundParameters -HtmlPath
+Invoke-DefenderPolicyReportInternal @PSBoundParameters
