@@ -573,6 +573,8 @@ function Convert-SectionsToHtml {
             border-radius:14px;
             box-shadow:0 6px 20px rgba(15,23,42,.08);
             padding:20px 22px;
+            word-break: break-word;
+            overflow-wrap: anywhere;
         }
         .section-header{
             display:flex;
@@ -1306,3 +1308,4 @@ function Invoke-DefenderPolicyReportInternal {
     Write-Output $text
 }
 
+Invoke-DefenderPolicyReportInternal @PSBoundParameters -htmlpath "$env:temp\defender-report.html" -LaunchHtml
