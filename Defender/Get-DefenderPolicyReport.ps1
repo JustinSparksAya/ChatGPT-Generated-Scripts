@@ -1306,4 +1306,3 @@ function Invoke-DefenderPolicyReportInternal {
     Write-Output $text
 }
 
-Invoke-DefenderPolicyReportInternal @PSBoundParameters -htmlpath "$env:temp\defender-report.html" -LaunchHtml
