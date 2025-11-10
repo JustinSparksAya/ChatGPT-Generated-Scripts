@@ -2,7 +2,7 @@
 param(
     [switch]$AsObject,
     [string]$OutFile,
-    [ValidateSet('Metadata','Compliance Summary','Engine & Signature State','Real-time & Core Protections','Cloud-delivered Protection & Automation','Exploit Guard & Ransomware Protections','Attack Surface Reduction Rules','Attack Surface Reduction Exclusions','Device Control','Firewall Profiles','Scan Health & Schedule','Exclusions','Controlled Folder Access','Windows Hello for Business Policy','Windows Hello PIN Complexity','Windows Hello Services','Local Users','Local Administrators','EDR Sensor State','Threat History')]
+    [ValidateSet('Device Info','Compliance Summary','Engine & Signature State','Real-time & Core Protections','Cloud-delivered Protection & Automation','Exploit Guard & Ransomware Protections','Attack Surface Reduction Rules','Attack Surface Reduction Exclusions','Device Control','Firewall Profiles','Scan Health & Schedule','Exclusions','Controlled Folder Access','Windows Hello for Business Policy','Windows Hello PIN Complexity','Windows Hello Services','Local Users','Local Administrators','EDR Sensor State','Threat History')]
     [string[]]$Section,
     [switch]$IncludeThreatHistory,
     [string]$CsvPath,
@@ -27,7 +27,7 @@ Write-Verbose ("Script root resolved to: {0}" -f $script:ScriptRoot)
 Write-Verbose ("ASR catalog path resolved to: {0}" -f $AsrCatalogPath)
 
 $script:SectionOrder = @(
-    'Metadata',
+    'Device Info',
     'Compliance Summary',
     'Engine & Signature State',
     'Real-time & Core Protections',
@@ -189,6 +189,31 @@ function Get-DeviceSummary {
                 $summary['Physical memory'] = ("{0:N2} GB" -f $totalMemoryGB)
             }
             if ($cs.NumberOfLogicalProcessors) { $summary['Logical processors'] = $cs.NumberOfLogicalProcessors }
+            if ($cs.HypervisorPresent -ne $null) {
+                $summary['Hypervisor present'] = if ($cs.HypervisorPresent) { 'Yes' } else { 'No' }
+            }
+            if ($cs.UserName) { $summary['Interactive user'] = $cs.UserName }
+            if ($cs.PartOfDomain -and $cs.Domain) {
+                $summary['Domain'] = $cs.Domain
+            } elseif ($cs.Workgroup) {
+                $summary['Workgroup'] = $cs.Workgroup
+            }
+            if ($cs.DomainRole -ne $null) {
+                $roleKey = [int]$cs.DomainRole
+                $roleMap = @{
+                    0 = 'Standalone workstation'
+                    1 = 'Member workstation'
+                    2 = 'Standalone server'
+                    3 = 'Member server'
+                    4 = 'Backup domain controller'
+                    5 = 'Primary domain controller'
+                }
+                if ($roleMap.ContainsKey($roleKey)) {
+                    $summary['Domain role'] = $roleMap[$roleKey]
+                } else {
+                    $summary['Domain role'] = $roleKey
+                }
+            }
         }
     } catch {
         Write-Verbose ("Unable to query Win32_ComputerSystem: {0}" -f $_.Exception.Message)
@@ -270,6 +295,51 @@ function Get-DeviceSummary {
         }
     } catch {
         Write-Verbose ("Unable to determine Secure Boot state: {0}" -f $_.Exception.Message)
+    }
+
+    try {
+        $ipAddresses = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+            Where-Object { $_.IPAddress -and $_.IPAddress -ne '127.0.0.1' -and $_.IPAddress -notmatch '^169\.254\.' }
+        $ipList = $ipAddresses |
+            Sort-Object InterfaceAlias,IPAddress |
+            ForEach-Object { "{0} ({1})" -f $_.IPAddress, $_.InterfaceAlias }
+        if ($ipList.Count -gt 0) {
+            $summary['IPv4 addresses'] = ($ipList -join '; ')
+        }
+    } catch {
+        Write-Verbose ("Unable to query IPv4 addresses: {0}" -f $_.Exception.Message)
+    }
+
+    try {
+        if (Get-Command -Name Get-BitLockerVolume -ErrorAction SilentlyContinue) {
+            $osVolume = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction Stop
+            if ($osVolume) {
+                $summary['BitLocker status'] = $osVolume.VolumeStatus
+                $summary['BitLocker protection'] = $osVolume.ProtectionStatus
+                if ($osVolume.EncryptionPercentage -ne $null) {
+                    $summary['BitLocker encryption %'] = "{0}%" -f $osVolume.EncryptionPercentage
+                }
+            }
+        }
+    } catch {
+        Write-Verbose ("Unable to query BitLocker status: {0}" -f $_.Exception.Message)
+    }
+
+    try {
+        if (Get-Command -Name Get-Tpm -ErrorAction SilentlyContinue) {
+            $tpm = Get-Tpm -ErrorAction Stop
+            if ($tpm) {
+                $summary['TPM present'] = if ($tpm.TpmPresent) { 'Yes' } else { 'No' }
+                if ($tpm.TpmPresent) {
+                    $summary['TPM ready'] = if ($tpm.TpmReady) { 'Yes' } else { 'No' }
+                    if ($tpm.ManufacturerVersion) {
+                        $summary['TPM firmware'] = $tpm.ManufacturerVersion
+                    }
+                }
+            }
+        }
+    } catch {
+        Write-Verbose ("Unable to query TPM state: {0}" -f $_.Exception.Message)
     }
 
     return $summary
@@ -563,9 +633,11 @@ function Convert-SectionsToHtml {
         }
         main{
             padding:32px;
-            display:grid;
-            grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+            display:flex;
+            flex-direction:column;
             gap:24px;
+            width:100%;
+            box-sizing:border-box;
         }
         .section-card{
             background:var(--card);
@@ -575,6 +647,7 @@ function Convert-SectionsToHtml {
             padding:20px 22px;
             word-break: break-word;
             overflow-wrap: anywhere;
+            width:100%;
         }
         .section-header{
             display:flex;
@@ -1009,7 +1082,7 @@ function Invoke-DefenderPolicyReportInternal {
             $metadataData[$key] = $deviceSummary[$key]
         }
     }
-    $sections['Metadata'] = New-Section -Name 'Metadata' -Type 'KeyValue' -Data $metadataData
+    $sections['Device Info'] = New-Section -Name 'Device Info' -Type 'KeyValue' -Data $metadataData
 
     $asrRows = @(
         Get-AsrRuleRows -Preference $mpPref -RuleDescriptions $asrRuleDescriptions -ActionMap $script:AsrActionMap
@@ -1308,4 +1381,4 @@ function Invoke-DefenderPolicyReportInternal {
     Write-Output $text
 }
 
-Invoke-DefenderPolicyReportInternal @PSBoundParameters -htmlpath "$env:temp\defender-report.html" -LaunchHtml
+Invoke-DefenderPolicyReportInternal @PSBoundParameters -htmlpath "$env:temp\defender-report.html" 
