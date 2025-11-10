@@ -7,6 +7,7 @@ param(
     [switch]$IncludeThreatHistory,
     [string]$CsvPath,
     [string]$HtmlPath,
+    [switch]$LaunchHtml,
     [string]$AsrCatalogPath,
     [string]$AsrCatalogUri = 'https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/attack-surface-reduction-rules-reference',
     [switch]$RefreshAsrCatalog
@@ -973,6 +974,7 @@ function Invoke-DefenderPolicyReportInternal {
         [switch]$IncludeThreatHistory,
         [string]$CsvPath,
         [string]$HtmlPath,
+        [switch]$LaunchHtml,
         [string]$AsrCatalogPath,
         [string]$AsrCatalogUri,
         [switch]$RefreshAsrCatalog
@@ -1281,12 +1283,14 @@ function Invoke-DefenderPolicyReportInternal {
         $htmlContent = Convert-SectionsToHtml -Sections $filteredSections -Title $htmlTitle
         Ensure-DirectoryForFile -Path $HtmlPath
         Set-Content -Path $HtmlPath -Value $htmlContent -Encoding UTF8
-        try {
-            if (Test-Path -Path $HtmlPath) {
-                Start-Process -FilePath $HtmlPath | Out-Null
+        if ($LaunchHtml) {
+            try {
+                if (Test-Path -Path $HtmlPath) {
+                    Start-Process -FilePath $HtmlPath | Out-Null
+                }
+            } catch {
+                Write-Verbose ("Unable to open HTML report {0}: {1}" -f $HtmlPath, $_.Exception.Message)
             }
-        } catch {
-            Write-Verbose ("Unable to open HTML report {0}: {1}" -f $HtmlPath, $_.Exception.Message)
         }
     }
 
@@ -1302,4 +1306,4 @@ function Invoke-DefenderPolicyReportInternal {
     Write-Output $text
 }
 
-Invoke-DefenderPolicyReportInternal @PSBoundParameters -HtmlPath $env:temp\defender-report.html
+Invoke-DefenderPolicyReportInternal @PSBoundParameters -htmlpath "$env:temp\defender-report.html" -LaunchHtml
