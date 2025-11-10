@@ -1,3 +1,4 @@
+#created using ChatGPT Codex
 [CmdletBinding()]
 param(
     [switch]$AsObject,
