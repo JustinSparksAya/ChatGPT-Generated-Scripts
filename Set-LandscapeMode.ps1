@@ -1,7 +1,7 @@
 # Change any monitor set to "Landscape (flipped)" back to "Landscape"
 # Run PowerShell as Administrator
 
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration\*\00\00" -Name Rotation -Value 1
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration\*\00\00" -Name Rotation -Value 1 -ErrorAction SilentlyContinue
 
 Add-Type -Language CSharp @"
 using System;
