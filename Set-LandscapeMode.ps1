@@ -1,5 +1,6 @@
 # Change any monitor set to "Landscape (flipped)" back to "Landscape"
 # Run PowerShell as Administrator
+Start-Transcript -Path "c:\OSDCloud\Set-Landscape.log"
 
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration\*\00\00" -Name Rotation -Value 1 -ErrorAction SilentlyContinue
 
@@ -117,6 +118,10 @@ public class ScreenRotate {
     }
 }
 "@
+
+Get-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration\*\00\00"
+
+Stop-Transcript
 
 # Run the fix
 $result = [ScreenRotate]::ForceLandscapeIfFlipped()
