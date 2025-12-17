@@ -2,7 +2,7 @@
 # Run PowerShell as Administrator
 Start-Transcript -Path "c:\OSDCloud\Set-Landscape.log"
 
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration\*\00\00" -Name Rotation -Value 1 -ErrorAction SilentlyContinue
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration\*\*\*" -Name Rotation -Value 1 -ErrorAction SilentlyContinue
 
 Add-Type -Language CSharp @"
 using System;
@@ -99,9 +99,20 @@ public class ScreenRotate {
             dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
 
             if (EnumDisplaySettings(dd.DeviceName, ENUM_CURRENT_SETTINGS, ref dm)) {
-                if (dm.dmDisplayOrientation == DMDO_180) {
+                int originalOrientation = dm.dmDisplayOrientation;
+
+                // If not already landscape, force to landscape
+                if (originalOrientation != DMDO_DEFAULT) {
+                    // If coming from portrait, swap width and height
+                    if (originalOrientation == DMDO_90 || originalOrientation == DMDO_270) {
+                        int temp = dm.dmPelsWidth;
+                        dm.dmPelsWidth = dm.dmPelsHeight;
+                        dm.dmPelsHeight = temp;
+                    }
+
                     dm.dmFields |= DM_DISPLAYORIENTATION;
                     dm.dmDisplayOrientation = DMDO_DEFAULT;
+
                     int res = ChangeDisplaySettingsEx(dd.DeviceName, ref dm, IntPtr.Zero, CDS_UPDATEREGISTRY, IntPtr.Zero);
                     if (res == DISP_CHANGE_SUCCESSFUL) changes++;
                 }
@@ -119,7 +130,8 @@ public class ScreenRotate {
 }
 "@
 
-Get-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration\*\00\00"
+
+Get-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration\*\*\*"
 
 Stop-Transcript
 
