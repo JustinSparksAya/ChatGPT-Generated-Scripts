@@ -4,6 +4,20 @@ Start-Transcript -Path "c:\OSDCloud\Set-Landscape.log"
 
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration\*\*\*" -Name Rotation -Value 1 -ErrorAction SilentlyContinue
 
+$Source = @"
+using System;
+using System.Runtime.InteropServices;
+
+public class SystemRotation {
+    // Calling the undocumented SetAutoRotation function by its ordinal (2507)
+    [DllImport("user32.dll", EntryPoint = "#2507", SetLastError = true)]
+    public static extern bool SetAutoRotation(bool bEnable);
+}
+"@
+
+Add-Type -TypeDefinition $Source
+[SystemRotation]::SetAutoRotation($false)
+
 Add-Type -Language CSharp @"
 using System;
 using System.Runtime.InteropServices;
